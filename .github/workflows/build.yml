@@ -21,10 +21,12 @@ on:
           - debug
 
 env:
-  GRADLE_VERSION: 7.4
-  JAVA_VERSION: '11'
-  ANDROID_SDK_PLATFORM: 30
-  ANDROID_BUILD_TOOLS: 30.0.3
+  JAVA_VERSION: '11'              # 保持 11，完美匹配 AGP 7.3.1
+  ANDROID_SDK_PLATFORM: 30        # 匹配 compileSdkVersion 30
+  ANDROID_BUILD_TOOLS: 30.0.3     # 匹配 AGP 7.3.1 推荐
+
+permissions:
+  contents: write   # 允许创建 Release (打 tag 时)
 
 jobs:
   build:
@@ -33,48 +35,36 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      # 1. 检出代码
       - name: 检出代码
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      # 2. 设置 JDK 11
       - name: 设置 JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
           java-version: ${{ env.JAVA_VERSION }}
 
-      # 3. 设置 Android SDK
-      - name: 设置 Android SDK
-        uses: android-actions/setup-android@v3
-
-      # 4. 缓存 SDK 组件（加速后续构建）
-      - name: 缓存 SDK 组件
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.android/build-cache
-            ~/.android/cache
-          key: ${{ runner.os }}-android-sdk-${{ env.ANDROID_SDK_PLATFORM }}-${{ env.ANDROID_BUILD_TOOLS }}
-          restore-keys: |
-            ${{ runner.os }}-android-sdk-
-
-      # 5. 安装必要的 SDK 组件
-      - name: 安装 SDK Platform 和 Build-Tools
+      # 关键修复：绕过 setup-android@v3 强制下载 JDK17 版 cmdline-tools 的问题
+      - name: 配置预装 Android SDK 环境
         run: |
+          echo "ANDROID_HOME=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "ANDROID_SDK_ROOT=/usr/local/lib/android/sdk" >> $GITHUB_ENV
+          echo "/usr/local/lib/android/sdk/cmdline-tools/latest/bin" >> $GITHUB_PATH
+          echo "/usr/local/lib/android/sdk/platform-tools" >> $GITHUB_PATH
+
+      - name: 接受许可并安装 SDK 组件
+        run: |
+          yes | sdkmanager --licenses || true
           sdkmanager "platforms;android-${{ env.ANDROID_SDK_PLATFORM }}" \
                      "build-tools;${{ env.ANDROID_BUILD_TOOLS }}" \
                      "platform-tools"
 
-      # 6. 配置 local.properties
       - name: 配置 local.properties
         run: |
-          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
-          echo "ndk.dir=$ANDROID_SDK_ROOT/ndk-bundle" >> local.properties || true
+          echo "sdk.dir=$ANDROID_HOME" > local.properties
 
-      # 7. 缓存 Gradle 依赖（关键优化，避免每次重新下载）
       - name: 缓存 Gradle Wrapper 和依赖
         uses: actions/cache@v4
         with:
@@ -85,17 +75,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-gradle-
 
-      # 8. 授予 gradlew 执行权限
       - name: 授予 gradlew 执行权限
         run: chmod +x gradlew
 
-      # 9. 验证 Gradle 环境
       - name: 验证 Gradle 环境
         run: |
           java -version
           ./gradlew --version
 
-      # 10. 构建 APK
       - name: 构建 ${{ github.event.inputs.build_type || 'release' }} APK
         run: |
           BUILD_TYPE="${{ github.event.inputs.build_type || 'release' }}"
@@ -104,7 +91,6 @@ jobs:
         env:
           GRADLE_OPTS: '-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.parallel=true'
 
-      # 11. 提取版本信息
       - name: 提取版本信息
         id: version
         run: |
@@ -118,7 +104,6 @@ jobs:
           echo "commit_sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
           echo "构建版本: v${VERSION_NAME} (${VERSION_CODE}) - ${BUILD_TYPE} - ${COMMIT_SHA}"
 
-      # 12. 重命名 APK（包含版本信息，便于识别）
       - name: 重命名 APK
         run: |
           BUILD_TYPE="${{ steps.version.outputs.build_type }}"
@@ -127,23 +112,21 @@ jobs:
             for apk in "$APK_DIR"/*.apk; do
               if [ -f "$apk" ]; then
                 BASENAME=$(basename "$apk" .apk)
-                NEWNAME="MiPayCard-v${{ steps.version.outputs.version_name }}-${{ steps.version.outputs.build_type }}-${{ steps.version.outputs.commit_sha }}.apk"
+                NEWNAME="MiPayCard-v${{ steps.version.outputs.version_name }}-${{ steps.version.outputs.build_type }}-${{ steps.version.outputs.commit_sha }}-${BASENAME}.apk"
                 mv "$apk" "$APK_DIR/$NEWNAME"
                 echo "重命名: $BASENAME.apk -> $NEWNAME"
               fi
             done
           fi
 
-      # 13. 上传构建产物
       - name: 上传 APK 产物
         uses: actions/upload-artifact@v4
         with:
           name: MiPayCard-v${{ steps.version.outputs.version_name }}-${{ steps.version.outputs.build_type }}
           path: app/build/outputs/apk/**/*.apk
           retention-days: 30
-          compression-level: 0  # APK 已压缩，无需再压
+          compression-level: 0
 
-      # 14. 构建摘要
       - name: 生成构建摘要
         if: always()
         run: |
@@ -162,7 +145,6 @@ jobs:
             echo "❌ 构建失败，请查看日志。" >> $GITHUB_STEP_SUMMARY
           fi
 
-  # 可选：创建 Release（仅在打 tag 时触发）
   release:
     name: 创建 Release
     needs: build
