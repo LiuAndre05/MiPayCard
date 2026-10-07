@@ -1,0 +1,186 @@
+name: Build MiPayCard APK
+
+on:
+  push:
+    branches: [ master, main ]
+    paths-ignore:
+      - '**.md'
+      - '.github/**'
+      - '!.github/workflows/**'
+  pull_request:
+    branches: [ master, main ]
+  workflow_dispatch:
+    inputs:
+      build_type:
+        description: '构建类型'
+        required: true
+        default: 'release'
+        type: choice
+        options:
+          - release
+          - debug
+
+env:
+  GRADLE_VERSION: 7.4
+  JAVA_VERSION: '11'
+  ANDROID_SDK_PLATFORM: 30
+  ANDROID_BUILD_TOOLS: 30.0.3
+
+jobs:
+  build:
+    name: 构建 APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      # 1. 检出代码
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # 2. 设置 JDK 11
+      - name: 设置 JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+
+      # 3. 设置 Android SDK
+      - name: 设置 Android SDK
+        uses: android-actions/setup-android@v3
+
+      # 4. 缓存 SDK 组件（加速后续构建）
+      - name: 缓存 SDK 组件
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.android/build-cache
+            ~/.android/cache
+          key: ${{ runner.os }}-android-sdk-${{ env.ANDROID_SDK_PLATFORM }}-${{ env.ANDROID_BUILD_TOOLS }}
+          restore-keys: |
+            ${{ runner.os }}-android-sdk-
+
+      # 5. 安装必要的 SDK 组件
+      - name: 安装 SDK Platform 和 Build-Tools
+        run: |
+          sdkmanager "platforms;android-${{ env.ANDROID_SDK_PLATFORM }}" \
+                     "build-tools;${{ env.ANDROID_BUILD_TOOLS }}" \
+                     "platform-tools"
+
+      # 6. 配置 local.properties
+      - name: 配置 local.properties
+        run: |
+          echo "sdk.dir=$ANDROID_SDK_ROOT" > local.properties
+          echo "ndk.dir=$ANDROID_SDK_ROOT/ndk-bundle" >> local.properties || true
+
+      # 7. 缓存 Gradle 依赖（关键优化，避免每次重新下载）
+      - name: 缓存 Gradle Wrapper 和依赖
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      # 8. 授予 gradlew 执行权限
+      - name: 授予 gradlew 执行权限
+        run: chmod +x gradlew
+
+      # 9. 验证 Gradle 环境
+      - name: 验证 Gradle 环境
+        run: |
+          java -version
+          ./gradlew --version
+
+      # 10. 构建 APK
+      - name: 构建 ${{ github.event.inputs.build_type || 'release' }} APK
+        run: |
+          BUILD_TYPE="${{ github.event.inputs.build_type || 'release' }}"
+          echo "开始构建: assemble${BUILD_TYPE^}"
+          ./gradlew "assemble${BUILD_TYPE^}" --stacktrace --info
+        env:
+          GRADLE_OPTS: '-Dorg.gradle.daemon=false -Dorg.gradle.jvmargs=-Xmx4g -Dorg.gradle.parallel=true'
+
+      # 11. 提取版本信息
+      - name: 提取版本信息
+        id: version
+        run: |
+          VERSION_NAME=$(grep -oP 'versionName\s+"\K[^"]+' app/build.gradle)
+          VERSION_CODE=$(grep -oP 'versionCode\s+\K[0-9]+' app/build.gradle)
+          BUILD_TYPE="${{ github.event.inputs.build_type || 'release' }}"
+          COMMIT_SHA=$(git rev-parse --short HEAD)
+          echo "version_name=$VERSION_NAME" >> $GITHUB_OUTPUT
+          echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
+          echo "build_type=$BUILD_TYPE" >> $GITHUB_OUTPUT
+          echo "commit_sha=$COMMIT_SHA" >> $GITHUB_OUTPUT
+          echo "构建版本: v${VERSION_NAME} (${VERSION_CODE}) - ${BUILD_TYPE} - ${COMMIT_SHA}"
+
+      # 12. 重命名 APK（包含版本信息，便于识别）
+      - name: 重命名 APK
+        run: |
+          BUILD_TYPE="${{ steps.version.outputs.build_type }}"
+          APK_DIR="app/build/outputs/apk/${BUILD_TYPE}"
+          if [ -d "$APK_DIR" ]; then
+            for apk in "$APK_DIR"/*.apk; do
+              if [ -f "$apk" ]; then
+                BASENAME=$(basename "$apk" .apk)
+                NEWNAME="MiPayCard-v${{ steps.version.outputs.version_name }}-${{ steps.version.outputs.build_type }}-${{ steps.version.outputs.commit_sha }}.apk"
+                mv "$apk" "$APK_DIR/$NEWNAME"
+                echo "重命名: $BASENAME.apk -> $NEWNAME"
+              fi
+            done
+          fi
+
+      # 13. 上传构建产物
+      - name: 上传 APK 产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: MiPayCard-v${{ steps.version.outputs.version_name }}-${{ steps.version.outputs.build_type }}
+          path: app/build/outputs/apk/**/*.apk
+          retention-days: 30
+          compression-level: 0  # APK 已压缩，无需再压
+
+      # 14. 构建摘要
+      - name: 生成构建摘要
+        if: always()
+        run: |
+          echo "## 构建结果" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| 项目 | 值 |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|-----|" >> $GITHUB_STEP_SUMMARY
+          echo "| 版本 | ${{ steps.version.outputs.version_name }} (${{ steps.version.outputs.version_code }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| 类型 | ${{ steps.version.outputs.build_type }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 提交 | ${{ steps.version.outputs.commit_sha }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| 状态 | ${{ job.status }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ "${{ job.status }}" == "success" ]; then
+            echo "✅ 构建成功！请在 Artifacts 中下载 APK。" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ 构建失败，请查看日志。" >> $GITHUB_STEP_SUMMARY
+          fi
+
+  # 可选：创建 Release（仅在打 tag 时触发）
+  release:
+    name: 创建 Release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: 下载构建产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: 创建 GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*.apk
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
