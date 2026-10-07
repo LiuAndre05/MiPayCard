@@ -40,11 +40,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: 设置 JDK ${{ env.JAVA_VERSION }}
+      - name: 设置 JDK 17
         uses: actions/setup-java@v4
         with:
           distribution: 'temurin'
-          java-version: ${{ env.JAVA_VERSION }}
+          java-version: 17
 
       # 关键修复：绕过 setup-android@v3 强制下载 JDK17 版 cmdline-tools 的问题
       - name: 配置预装 Android SDK 环境
@@ -60,6 +60,12 @@ jobs:
           sdkmanager "platforms;android-${{ env.ANDROID_SDK_PLATFORM }}" \
                      "build-tools;${{ env.ANDROID_BUILD_TOOLS }}" \
                      "platform-tools"
+
+      - name: 切换回 JDK 11（供 Gradle 构建使用）
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '11'
 
       - name: 配置 local.properties
         run: |
